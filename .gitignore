@@ -1,0 +1,36 @@
+# Environment & Secrets
+.env
+.env.*
+!.env.example
+
+# Python Cache & Runtime Environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# IDE & OS Artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs & Temporary Files
+*.log
+logs/
+tmp/
+temp/
+debug_pages/
+
+# Output Datasets & Scrapes
+*.csv
+*.xlsx
+screenshots/
+
+# Docker build artifacts
+.docker/
