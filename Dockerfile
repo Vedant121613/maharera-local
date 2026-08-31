@@ -1,5 +1,5 @@
-# Step 1: Frontend Build
-FROM node:18-alpine AS frontend-builder
+# Step 1: Frontend Build (Node 20 set kiya hai)
+FROM node:20-alpine AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm install
@@ -7,11 +7,11 @@ COPY frontend/ ./
 RUN npm run build
 
 # Step 2: Express Server & Static Serving
-FROM node:18-alpine
+FROM node:20-alpine
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm install --production
+RUN npm install --omit=dev
 
 COPY server.js ./
 COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
