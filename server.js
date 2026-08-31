@@ -10,7 +10,9 @@ app.use(express.json({ limit: '50mb' }));
 // PostgreSQL Pool Connection (Render / Cloud DB URL)
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.DATABASE_URL ? { rejectUnauthorized: false } : false
+ ssl: process.env.DATABASE_URL && process.env.DATABASE_URL.includes('sslmode=require') 
+    ? { rejectUnauthorized: false } 
+    : false
 });
 
 // API Routes
