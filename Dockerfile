@@ -1,24 +1,20 @@
-# Stage 1: Build React Frontend
-FROM node:18-alpine AS builder
+# Step 1: Frontend Build
+FROM node:18-alpine AS frontend-builder
 WORKDIR /app/frontend
 COPY frontend/package*.json ./
 RUN npm install
 COPY frontend/ ./
 RUN npm run build
 
-# Stage 2: Express Server Setup
+# Step 2: Express Server & Static Serving
 FROM node:18-alpine
 WORKDIR /app
 
-# Install Root Dependencies (Express, pg, cors)
 COPY package*.json ./
 RUN npm install --production
 
-# Copy Express Server
 COPY server.js ./
-
-# Copy Frontend Build Output from Stage 1
-COPY --from=builder /app/frontend/dist ./frontend/dist
+COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
 
 EXPOSE 5000
 CMD ["node", "server.js"]
