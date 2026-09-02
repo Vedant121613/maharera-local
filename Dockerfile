@@ -1,20 +1,18 @@
-# Step 1: Frontend Build (Node 20 set kiya hai)
-FROM node:20-alpine AS frontend-builder
-WORKDIR /app/frontend
-COPY frontend/package*.json ./
-RUN npm install
-COPY frontend/ ./
-RUN npm run build
-
-# Step 2: Express Server & Static Serving
 FROM node:20-alpine
+
 WORKDIR /app
 
+# 1. Copy root package files & install server dependencies
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm install
 
-COPY server.js ./
-COPY --from=frontend-builder /app/frontend/dist ./frontend/dist
+# 2. Copy frontend package files & build React static files
+COPY frontend/package*.json ./frontend/
+RUN cd frontend && npm install
+
+COPY . .
+RUN cd frontend && npm run build
 
 EXPOSE 5000
+
 CMD ["node", "server.js"]
