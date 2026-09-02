@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Card, Text, Button, Select, Group, Stack, Badge, Table, Progress, Alert, SimpleGrid } from '@mantine/core';
-import { IconAlertCircle, IconBuildingCommunity, IconLink, IconDatabase, IconAlertTriangle, IconMapPin } from '@tabler/icons-react';
+import { IconAlertCircle } from '@tabler/icons-react';
 
 const API_BASE_URL = (import.meta as any).env?.VITE_API_URL || 'http://localhost:5000/api';
 
@@ -68,6 +68,7 @@ export default function ScraperControl() {
         </Alert>
       )}
 
+      {/* Live Worker Status */}
       <Card withBorder padding="md" radius="md">
         <Text fw={600} size="lg" mb="xs">Live PC Worker Status</Text>
         <Group gap="xs">
@@ -83,6 +84,7 @@ export default function ScraperControl() {
         </Group>
       </Card>
 
+      {/* Trigger Job without Start/End page */}
       <Card withBorder padding="md" radius="md">
         <Text fw={600} size="lg" mb="sm">Trigger New Server Job</Text>
         <Group align="flex-end">
@@ -103,6 +105,7 @@ export default function ScraperControl() {
         </Group>
       </Card>
 
+      {/* Queue Progress Table */}
       <Card withBorder padding="md" radius="md">
         <Text fw={600} size="lg" mb="sm">Job Queue & Progress</Text>
         <Table highlightOnHover>
@@ -135,6 +138,7 @@ export default function ScraperControl() {
         </Table>
       </Card>
 
+      {/* Database Statistics */}
       <SimpleGrid cols={{ base: 1, sm: 5 }} spacing="md">
         <Card withBorder padding="md"><Text size="xs" c="dimmed" fw={700}>DISTRICTS</Text><Text fw={700} size="xl">{stats.districts}</Text></Card>
         <Card withBorder padding="md"><Text size="xs" c="dimmed" fw={700}>PROJECTS</Text><Text fw={700} size="xl">{stats.projects.toLocaleString()}</Text></Card>
