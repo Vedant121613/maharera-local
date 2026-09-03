@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import sqlite3
+import threading
 import subprocess
 from pathlib import Path
 
@@ -208,34 +209,55 @@ def run_data_job(job):
     print(f"[worker] Data job {job_id} done: {len(rows)} processed, {succeeded} success, {failed} failed.")
 
 
+STOP_EVENT = threading.Event()
+
+
+def poll_loop(job_type, run_fn):
+    """Independent poll loop for one job type ('link' or 'data'). Runs on its
+    own thread so a long Link job can never delay or block a Data job (or
+    vice versa) — each has its own Start/Stop lifecycle end to end."""
+    print(f"[worker:{job_type}] loop started")
+    while not STOP_EVENT.is_set():
+        try:
+            job = api.get_next_job(job_type)
+            if not job:
+                time.sleep(POLL_INTERVAL)
+                continue
+            run_fn(job)
+        except Exception as e:
+            print(f"[worker:{job_type}] Unhandled error: {e}. Retrying in {POLL_INTERVAL}s...")
+            time.sleep(POLL_INTERVAL)
+
+
+def heartbeat_loop():
+    while not STOP_EVENT.is_set():
+        try:
+            api.heartbeat()
+        except Exception as e:
+            print(f"[worker] heartbeat failed: {e}")
+        time.sleep(POLL_INTERVAL)
+
+
 def main():
     print("=" * 60)
     print("MahaRERA scraper worker starting")
     print(f"API_BASE_URL = {os.getenv('API_BASE_URL')}")
     print("=" * 60)
 
-    while True:
-        try:
-            api.heartbeat()
-            job = api.get_next_job()
-            if not job:
-                time.sleep(POLL_INTERVAL)
-                continue
+    threads = [
+        threading.Thread(target=heartbeat_loop, daemon=True),
+        threading.Thread(target=poll_loop, args=("link", run_link_job), daemon=True),
+        threading.Thread(target=poll_loop, args=("data", run_data_job), daemon=True),
+    ]
+    for t in threads:
+        t.start()
 
-            if job["type"] == "link":
-                run_link_job(job)
-            elif job["type"] == "data":
-                run_data_job(job)
-            else:
-                print(f"[worker] Unknown job type: {job}")
-                api.post_complete(job["id"], "FAILED", error=f"Unknown job type {job['type']}")
-
-        except KeyboardInterrupt:
-            print("\n[worker] Shutting down (Ctrl+C).")
-            break
-        except Exception as e:
-            print(f"[worker] Unhandled error: {e}. Retrying in {POLL_INTERVAL}s...")
-            time.sleep(POLL_INTERVAL)
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print("\n[worker] Shutting down (Ctrl+C)...")
+        STOP_EVENT.set()
 
 
 if __name__ == "__main__":

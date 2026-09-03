@@ -30,8 +30,9 @@ def heartbeat():
     return _request("POST", "/api/worker/heartbeat")
 
 
-def get_next_job():
-    data = _request("GET", "/api/worker/jobs/next")
+def get_next_job(job_type=None):
+    params = {"type": job_type} if job_type else None
+    data = _request("GET", "/api/worker/jobs/next", params=params)
     return data.get("data")
 
 

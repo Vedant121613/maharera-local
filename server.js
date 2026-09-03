@@ -2,7 +2,29 @@ const express = require('express');
 const path = require('path');
 const { Pool } = require('pg');
 const cors = require('cors');
-const { Parser: CsvParser } = require('json2csv');
+// The frontend's buildUrl() sends unset filters as the literal string
+// "null" (not omitted), since it only checks `value !== undefined`. Treat
+// those (and "undefined"/"") as "no filter" everywhere we read query params.
+function cleanParam(v) {
+  if (v === undefined || v === null) return null;
+  const s = String(v).trim();
+  return s === '' || s === 'null' || s === 'undefined' ? null : s;
+}
+
+// Tiny dependency-free CSV serializer (avoids pinning an extra npm package
+// for a one-line need; handles quoting/commas/newlines/nulls).
+function toCsv(rows) {
+  if (!rows.length) return '';
+  const headers = Object.keys(rows[0]);
+  const escape = (v) => {
+    if (v === null || v === undefined) return '';
+    const s = String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [headers.join(',')];
+  for (const row of rows) lines.push(headers.map((h) => escape(row[h])).join(','));
+  return lines.join('\n');
+}
 
 const app = express();
 app.use(cors());
@@ -291,7 +313,11 @@ app.get('/api/links', async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 25, 1), 500);
-    const { search, district, status, sortColumn, sortDirection } = req.query;
+    const district = cleanParam(req.query.district);
+    const status = cleanParam(req.query.status);
+    const search = cleanParam(req.query.search);
+    const sortColumn = cleanParam(req.query.sortColumn);
+    const sortDirection = cleanParam(req.query.sortDirection);
 
     const where = [];
     const params = [];
@@ -357,8 +383,7 @@ app.post('/api/links/upload', express.raw({ type: '*/*', limit: '50mb' }), async
 app.get('/api/links/export', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM links ORDER BY district, rera_id');
-    const parser = new CsvParser();
-    const csv = parser.parse(rows);
+    const csv = toCsv(rows);
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="links-export.csv"');
     res.send(csv);
@@ -374,7 +399,8 @@ app.get('/api/basic-data', async (req, res) => {
   try {
     const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
     const pageSize = Math.min(Math.max(parseInt(req.query.pageSize, 10) || 25, 1), 500);
-    const { search, district } = req.query;
+    const district = cleanParam(req.query.district);
+    const search = cleanParam(req.query.search);
 
     const where = [];
     const params = [];
@@ -430,8 +456,7 @@ app.post('/api/basic-data/upload', express.raw({ type: '*/*', limit: '50mb' }), 
 app.get('/api/basic-data/export', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM basic_data ORDER BY district, rera_id');
-    const parser = new CsvParser();
-    const csv = parser.parse(rows);
+    const csv = toCsv(rows);
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="basic-data-export.csv"');
     res.send(csv);
@@ -450,15 +475,21 @@ app.post('/api/worker/heartbeat', (req, res) => {
 });
 
 app.get('/api/worker/jobs/next', async (req, res) => {
+  // Optional ?type=link|data lets the worker run independent link/data poll
+  // loops concurrently, each only ever claiming its own job type (so a busy
+  // Data job can never delay a Link job, or vice versa).
+  const jobType = cleanParam(req.query.type);
   try {
+    const typeFilter = jobType ? 'AND worker_type = $1' : '';
+    const params = jobType ? [jobType] : [];
     const { rows } = await pool.query(`
       UPDATE scrape_jobs SET status = 'RUNNING', started_at = COALESCE(started_at, NOW()), updated_at = NOW()
       WHERE id = (
-        SELECT id FROM scrape_jobs WHERE status = 'PENDING' ORDER BY created_at ASC
+        SELECT id FROM scrape_jobs WHERE status = 'PENDING' ${typeFilter} ORDER BY created_at ASC
         FOR UPDATE SKIP LOCKED LIMIT 1
       )
       RETURNING id, worker_type AS type, district, district_id AS "districtId", status
-    `);
+    `, params);
     res.json({ success: true, data: rows[0] || null });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -493,8 +524,9 @@ app.post('/api/worker/jobs/:id/complete', async (req, res) => {
   const { status, error } = req.body; // COMPLETED | STOPPED | FAILED
   try {
     await pool.query(
-      `UPDATE scrape_jobs SET status = $2, error = $3, updated_at = NOW(),
-       completed_at = CASE WHEN $2 = 'COMPLETED' THEN NOW() ELSE completed_at END WHERE id = $1`,
+      `UPDATE scrape_jobs SET status = $2::varchar, error = $3, updated_at = NOW(),
+       completed_at = CASE WHEN $2::varchar = 'COMPLETED' THEN NOW() ELSE completed_at END
+       WHERE id = $1::int`,
       [req.params.id, status, error || null]
     );
     res.json({ success: true });
