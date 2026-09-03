@@ -10,7 +10,6 @@ import { LoadingState, ErrorState } from '../components/common/AsyncStates';
 import { ConfirmDialog } from '../components/common/ConfirmDialog';
 import { DISTRICTS } from '../mocks/districts';
 import { formatNumber } from '../utils/exportUtils';
-import ScraperControl from '../components/ScraperControl';
 
 export default function ScrapingPage() {
   const [stats, setStats] = useState<DashboardStats | null>(null);
@@ -57,6 +56,7 @@ export default function ScrapingPage() {
   };
 
   const handleWorkerAction = (districtId: number, worker: WorkerKind, action: WorkerAction) => {
+    // Stop is destructive-ish (interrupts a running job) — confirm it.
     if (action === 'stop') {
       const districtName = districts.find((d) => d.districtId === districtId)?.district ?? '';
       setConfirmTarget({ districtId, districtName, worker, action });
@@ -84,9 +84,6 @@ export default function ScrapingPage() {
           Monitor and control link/data scraping progress across all Maharashtra districts.
         </Text>
       </div>
-
-      {/* Live Worker Queue Control Panel */}
-      <ScraperControl />
 
       {stats && (
         <SimpleGrid cols={{ base: 1, xs: 2, md: 3, lg: 5 }} spacing="md">
