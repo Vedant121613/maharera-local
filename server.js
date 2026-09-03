@@ -138,15 +138,15 @@ app.get('/api/dashboard/stats', async (req, res) => {
       pool.query('SELECT COUNT(*)::int AS c FROM basic_data'),
       pool.query("SELECT COUNT(*)::int AS c FROM basic_data WHERE status = 'FAILED'"),
     ]);
+    // NOTE: no {success, data} envelope here — the frontend's apiRequest()
+    // already wraps whatever JSON we send in one, so we return the raw
+    // DashboardStats shape directly (wrapping it again double-nests it).
     res.json({
-      success: true,
-      data: {
-        totalDistricts: DISTRICTS.length,
-        totalProjects: linkRows[0].c,
-        totalLinks: linkRows[0].c,
-        totalDataScraped: dataRows[0].c,
-        totalFailed: failedRows[0].c,
-      },
+      totalDistricts: DISTRICTS.length,
+      totalProjects: linkRows[0].c,
+      totalLinks: linkRows[0].c,
+      totalDataScraped: dataRows[0].c,
+      totalFailed: failedRows[0].c,
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -208,7 +208,7 @@ app.get('/api/scraping/districts', async (req, res) => {
       };
     });
 
-    res.json({ success: true, data });
+    res.json(data); // raw DistrictScrapingState[] — see note above
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -261,26 +261,23 @@ app.post('/api/scraping/:districtId/:worker/:action', async (req, res) => {
     const { rows: dataCountRows } = await pool.query('SELECT COUNT(*)::int AS c FROM basic_data WHERE district = $1', [district.name]);
 
     res.json({
-      success: true,
-      data: {
-        district: district.name,
-        districtId: district.id,
-        linkStatus: mapStatus(lj?.status),
-        dataStatus: mapStatus(dj?.status),
-        linkProgress: {
-          totalProjects: lj?.total || 0,
-          projectsProcessed: lj?.processed || 0,
-          linksFound: linkCountRows[0].c,
-          linksFailed: lj?.failed || 0,
-        },
-        dataProgress: {
-          totalLinks: linkCountRows[0].c,
-          dataScraped: dataCountRows[0].c,
-          dataPending: Math.max(linkCountRows[0].c - dataCountRows[0].c, 0),
-          dataFailed: dj?.failed || 0,
-        },
-        lastUpdated: new Date().toISOString(),
+      district: district.name,
+      districtId: district.id,
+      linkStatus: mapStatus(lj?.status),
+      dataStatus: mapStatus(dj?.status),
+      linkProgress: {
+        totalProjects: lj?.total || 0,
+        projectsProcessed: lj?.processed || 0,
+        linksFound: linkCountRows[0].c,
+        linksFailed: lj?.failed || 0,
       },
+      dataProgress: {
+        totalLinks: linkCountRows[0].c,
+        dataScraped: dataCountRows[0].c,
+        dataPending: Math.max(linkCountRows[0].c - dataCountRows[0].c, 0),
+        dataFailed: dj?.failed || 0,
+      },
+      lastUpdated: new Date().toISOString(),
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -332,8 +329,8 @@ app.get('/api/links', async (req, res) => {
     }));
 
     res.json({
-      success: true,
-      data: { data, pagination: { page, pageSize, totalItems, totalPages: Math.ceil(totalItems / pageSize) || 1 } },
+      data,
+      pagination: { page, pageSize, totalItems, totalPages: Math.ceil(totalItems / pageSize) || 1 },
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -351,7 +348,7 @@ app.post('/api/links/upload', express.raw({ type: '*/*', limit: '50mb' }), async
     await pool.query(sql);
     const after = await pool.query('SELECT COUNT(*)::int AS c FROM links');
     const inserted = after.rows[0].c - before.rows[0].c;
-    res.json({ success: true, data: { success: true, totalRecords: after.rows[0].c, inserted, duplicates: 0, failed: 0 } });
+    res.json({ success: true, totalRecords: after.rows[0].c, inserted, duplicates: 0, failed: 0 });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -409,8 +406,8 @@ app.get('/api/basic-data', async (req, res) => {
     }));
 
     res.json({
-      success: true,
-      data: { data, pagination: { page, pageSize, totalItems, totalPages: Math.ceil(totalItems / pageSize) || 1 } },
+      data,
+      pagination: { page, pageSize, totalItems, totalPages: Math.ceil(totalItems / pageSize) || 1 },
     });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -424,7 +421,7 @@ app.post('/api/basic-data/upload', express.raw({ type: '*/*', limit: '50mb' }), 
     await pool.query(sql);
     const after = await pool.query('SELECT COUNT(*)::int AS c FROM basic_data');
     const inserted = after.rows[0].c - before.rows[0].c;
-    res.json({ success: true, data: { success: true, totalRecords: after.rows[0].c, inserted, duplicates: 0, failed: 0 } });
+    res.json({ success: true, totalRecords: after.rows[0].c, inserted, duplicates: 0, failed: 0 });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
