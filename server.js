@@ -100,9 +100,11 @@ CREATE INDEX IF NOT EXISTS idx_links_district ON links(district);
 
 -- Certificate PDF storage (NEW, additive) — the actual PDF bytes returned
 -- by /project-document?id=<qstr>&type=DocProjectCert, stored per project.
-ALTER TABLE links ADD COLUMN IF NOT EXISTS certificate_pdf BYTEA;
+-- Certificate URL storage (NEW, additive) — the /project-document?id=...
+-- link itself, stored exactly like project_url, since the endpoint requires
+-- the site's own browser session to actually return a PDF (see link_scraper.py).
+ALTER TABLE links ADD COLUMN IF NOT EXISTS certificate_url TEXT;
 ALTER TABLE links ADD COLUMN IF NOT EXISTS certificate_status VARCHAR(20);
-ALTER TABLE links ADD COLUMN IF NOT EXISTS certificate_downloaded_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS basic_data (
   id BIGSERIAL PRIMARY KEY,
@@ -184,7 +186,7 @@ app.get('/api/dashboard/stats', async (req, res) => {
 function mapStatus(s) {
   switch (s) {
     case 'RUNNING': return 'running';
-    case 'STOP_REQUESTED': return 'running';
+    case 'STOP_REQUESTED': return 'paused'; // "stopping" — frontend's WorkerStatus has no distinct value, 'paused' is the closest honest signal
     case 'STOPPED': return 'stopped';
     case 'COMPLETED': return 'completed';
     case 'FAILED': return 'failed';
@@ -356,6 +358,7 @@ app.get('/api/links', async (req, res) => {
       reraId: r.rera_id,
       projectName: r.project_name || 'N/A',
       projectUrl: r.project_url,
+      certificateUrl: r.certificate_url || 'N/A', // extra field — safe to ignore if unused by the frontend today
       status: r.status === 'active' ? 'active' : r.status,
       scrapedAt: r.scraped_at,
     }));
@@ -381,24 +384,6 @@ app.post('/api/links/upload', express.raw({ type: '*/*', limit: '50mb' }), async
     const after = await pool.query('SELECT COUNT(*)::int AS c FROM links');
     const inserted = after.rows[0].c - before.rows[0].c;
     res.json({ success: true, totalRecords: after.rows[0].c, inserted, duplicates: 0, failed: 0 });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-// Serves one project's stored certificate PDF straight from Postgres.
-app.get('/api/links/:reraId/certificate', async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      'SELECT certificate_pdf, certificate_status FROM links WHERE rera_id = $1 LIMIT 1',
-      [req.params.reraId]
-    );
-    if (!rows[0] || !rows[0].certificate_pdf) {
-      return res.status(404).json({ success: false, error: rows[0]?.certificate_status || 'Certificate not available' });
-    }
-    res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `inline; filename="${req.params.reraId}.pdf"`);
-    res.send(rows[0].certificate_pdf);
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -559,37 +544,9 @@ app.post('/api/worker/jobs/:id/complete', async (req, res) => {
   }
 });
 
-// Certificate PDFs — worker uploads the bytes it downloaded for one project.
-// One row per (district, rera_id) already exists via /api/worker/links;
-// this just attaches the PDF onto that same row.
-app.post('/api/worker/certificates', async (req, res) => {
-  const { district, reraId, pdfBase64, status } = req.body;
-  if (!district || !reraId) {
-    return res.status(400).json({ success: false, error: 'district and reraId are required' });
-  }
-  try {
-    if (pdfBase64) {
-      await pool.query(
-        `UPDATE links SET certificate_pdf = decode($3, 'base64'), certificate_status = 'DOWNLOADED',
-         certificate_downloaded_at = NOW() WHERE district = $1 AND rera_id = $2`,
-        [district, reraId, pdfBase64]
-      );
-    } else {
-      await pool.query(
-        `UPDATE links SET certificate_status = $3, certificate_downloaded_at = NOW()
-         WHERE district = $1 AND rera_id = $2`,
-        [district, reraId, status || 'FAILED']
-      );
-    }
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 // Link scraper uploads discovered links in batches for a given job/district
 app.post('/api/worker/links', async (req, res) => {
-  const { district, rows } = req.body; // rows: [{reraId, projectName, pincode, viewUrl, pageNumber}]
+  const { district, rows } = req.body; // rows: [{reraId, projectName, pincode, viewUrl, pageNumber, certificateUrl, certificateStatus}]
   if (!district || !Array.isArray(rows)) {
     return res.status(400).json({ success: false, error: 'district and rows[] are required' });
   }
@@ -600,13 +557,15 @@ app.post('/api/worker/links', async (req, res) => {
     for (const r of rows) {
       if (!r.reraId || r.reraId === 'N/A') continue;
       const result = await client.query(
-        `INSERT INTO links (district, rera_id, project_name, pincode, project_url, page_number)
-         VALUES ($1,$2,$3,$4,$5,$6)
+        `INSERT INTO links (district, rera_id, project_name, pincode, project_url, page_number, certificate_url, certificate_status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT (district, rera_id) DO UPDATE SET
            project_name = EXCLUDED.project_name, pincode = EXCLUDED.pincode,
-           project_url = EXCLUDED.project_url, page_number = EXCLUDED.page_number
+           project_url = EXCLUDED.project_url, page_number = EXCLUDED.page_number,
+           certificate_url = EXCLUDED.certificate_url, certificate_status = EXCLUDED.certificate_status
          RETURNING (xmax = 0) AS inserted`,
-        [district, r.reraId, r.projectName || 'N/A', r.pincode || 'N/A', r.viewUrl || 'N/A', r.pageNumber || 0]
+        [district, r.reraId, r.projectName || 'N/A', r.pincode || 'N/A', r.viewUrl || 'N/A', r.pageNumber || 0,
+         r.certificateUrl || 'N/A', r.certificateStatus || 'N/A']
       );
       if (result.rows[0]?.inserted) inserted += 1;
     }

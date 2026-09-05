@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import base64
 import sqlite3
 import threading
 import subprocess
@@ -21,7 +20,7 @@ LINK_SCRAPER = BASE_DIR / "link_scraper.py"
 DATA_SCRAPER = BASE_DIR / "data_scraper.py"
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
-STATUS_CHECK_INTERVAL = int(os.getenv("STATUS_CHECK_INTERVAL", "10"))
+STATUS_CHECK_INTERVAL = int(os.getenv("STATUS_CHECK_INTERVAL", "3"))  # was 10s — Stop felt slow to react
 
 
 def safe_name(district: str) -> str:
@@ -71,37 +70,12 @@ def read_links_xlsx(path: Path):
             "pincode": rec.get("Pincode"),
             "viewUrl": rec.get("View Details URL"),
             "pageNumber": rec.get("Page Number"),
-            "certificatePath": rec.get("Certificate PDF Path"),
+            "certificateUrl": rec.get("Certificate URL"),
             "certificateStatus": rec.get("Certificate Status"),
         })
     wb.close()
     return rows
 
-
-def upload_certificates(district, rows):
-    """Uploads each project's already-downloaded certificate PDF (produced by
-    link_scraper.py, see 'Certificate PDF Path'/'Certificate Status' columns)
-    to the backend so it's stored in Postgres. One failure never stops the
-    rest — logged and skipped, same as everywhere else in this worker."""
-    uploaded, failed = 0, 0
-    for r in rows:
-        rera_id = r.get("reraId")
-        if not rera_id or rera_id == "N/A":
-            continue
-        cert_path = r.get("certificatePath")
-        try:
-            if cert_path and cert_path != "N/A" and os.path.exists(cert_path):
-                with open(cert_path, "rb") as f:
-                    pdf_b64 = base64.b64encode(f.read()).decode("ascii")
-                api.post_certificate(district, rera_id, pdf_base64=pdf_b64)
-                uploaded += 1
-            else:
-                api.post_certificate(district, rera_id, status=r.get("certificateStatus") or "NOT_FOUND_ON_PAGE")
-        except Exception as e:
-            failed += 1
-            print(f"[worker] Certificate upload failed for {rera_id}: {e}")
-    if uploaded or failed:
-        print(f"[worker] Certificates uploaded: {uploaded}, failed: {failed}")
 
 
 def run_link_job(job):
@@ -129,7 +103,6 @@ def run_link_job(job):
     rows = read_links_xlsx(output_file)
     inserted = api.post_links(district, rows) if rows else 0
     api.post_progress(job_id, processed=len(rows), total=len(rows), found=inserted)
-    upload_certificates(district, rows)
 
     if was_stopped:
         api.post_complete(job_id, "STOPPED")

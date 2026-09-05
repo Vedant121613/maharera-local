@@ -35,8 +35,17 @@ DISTRICT_NAME = os.getenv("SCRAPE_DISTRICT_NAME", "Pune")
 STOP_FLAG_PATH = os.getenv("STOP_FLAG_PATH", "")
 
 
-def check_stop_flag():
+def check_stop_flag(pending_futures=None):
+    """Raises KeyboardInterrupt if a stop was requested. When called with the
+    dict of futures currently submitted to the executor, it also cancels
+    every one that hasn't started yet — without this, ThreadPoolExecutor's
+    default shutdown() just waits for the whole queue to drain, which is why
+    Stop used to take a long time to actually take effect."""
     if STOP_FLAG_PATH and os.path.exists(STOP_FLAG_PATH):
+        if pending_futures:
+            for f in pending_futures:
+                if not f.done():
+                    f.cancel()
         raise KeyboardInterrupt("STOP_REQUESTED via worker")
 
 # Concurrency Parameters
@@ -55,14 +64,14 @@ OUTPUT_FILENAME = os.getenv("SCRAPE_OUTPUT_FILE", "PuneRera3.xlsx")
 SHEET_NAME = "Pune Projects"
 DEBUG_DIR = "debug_pages"
 
-# --- Certificate download (NEW, additive) -----------------------------
+# --- Certificate URL (NEW, additive) -----------------------------------
 # The "View Certificate" eye icon on each project card triggers a request
 # like /project-document?id=<data-qstr>&type=DocProjectCert. data-qstr is
-# project-specific and is scraped fresh per page — never hardcoded.
+# project-specific and is scraped fresh per page — never hardcoded. That
+# endpoint requires the site's own browser/session state to actually return
+# a PDF, so we store the URL (same as View Details URL) rather than fetching it.
 CERTIFICATE_DOC_TYPE = "DocProjectCert"
 CERTIFICATE_ENDPOINT = f"{BASE_URL}/project-document"
-CERTIFICATE_DIR = os.getenv("SCRAPE_CERT_DIR", "certificates")
-CERT_READ_TIMEOUT = 20.0   # PDFs are larger/slower than the HTML search pages
 
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -408,7 +417,7 @@ def parse_html_content(html_content: str, source_page: int) -> List[dict]:
 
 
 # ==========================================
-# CERTIFICATE PDF DOWNLOAD (NEW, additive — does not touch any parser above)
+# CERTIFICATE URL EXTRACTION (NEW, additive — does not touch any parser above)
 # ==========================================
 def extract_certificate_qstr_map(html_content: str) -> Dict[str, str]:
     """Scans the raw page HTML for every "View Certificate" eye icon
@@ -460,59 +469,13 @@ def extract_certificate_qstr_map(html_content: str) -> Dict[str, str]:
     return qstr_map
 
 
-def sanitize_filename(value: str) -> str:
-    return re.sub(r'[^A-Za-z0-9_-]', '_', value or "unknown")
-
-
-def download_certificate_pdf(session: requests.Session, rera_id: str, qstr: str) -> Tuple[bool, str]:
-    """Fetches the actual certificate PDF bytes for one project (the same
-    request the site's own JS fires when the eye icon is clicked) and saves
-    it to CERTIFICATE_DIR. Returns (success, local_path_or_error_message).
-    Never raises — caller treats failures as a normal per-project outcome.
-    """
-    if not os.path.exists(CERTIFICATE_DIR):
-        os.makedirs(CERTIFICATE_DIR, exist_ok=True)
-
-    dest_path = os.path.join(CERTIFICATE_DIR, f"{sanitize_filename(rera_id)}.pdf")
-    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-        return True, dest_path  # already downloaded in a previous run (resume)
-
-    extra_headers = {
-        "Accept": "*/*",
-        "Referer": f"{BASE_URL}{SEARCH_ENDPOINT}",
-        "X-Requested-With": "XMLHttpRequest",
-    }
-    params = {"id": qstr, "type": CERTIFICATE_DOC_TYPE}
-
-    try:
-        resp = session.get(
-            CERTIFICATE_ENDPOINT,
-            params=params,
-            headers=extra_headers,
-            timeout=(CONNECT_TIMEOUT, CERT_READ_TIMEOUT),
-        )
-        if resp.status_code != 200:
-            return False, f"HTTP {resp.status_code}"
-
-        content = resp.content
-        if not content or not content.lstrip()[:5].startswith(b"%PDF"):
-            return False, "Response was not a PDF (site likely returned an error/HTML page)"
-
-        with open(dest_path, "wb") as f:
-            f.write(content)
-        return True, dest_path
-    except requests.exceptions.Timeout:
-        return False, "Certificate download timed out"
-    except requests.RequestException as e:
-        return False, f"Network error: {e}"
-    except Exception as e:
-        return False, f"Unexpected error: {e}"
-
-
-def attach_certificates(session: requests.Session, projects: List[dict], page_html: str) -> None:
-    """Mutates each project dict in-place, adding 'Certificate PDF Path' and
-    'Certificate Status'. One project's failure never stops the others or
-    the rest of the scrape (logged and skipped, per-project)."""
+def attach_certificate_urls(projects: List[dict], page_html: str) -> None:
+    """Mutates each project dict in-place, adding 'Certificate URL' and
+    'Certificate Status'. This ONLY builds the URL string (no network
+    request) — the site's /project-document endpoint requires the exact
+    browser session/anti-bot state a plain HTTP client can't replicate, so
+    we store the link itself, exactly like 'View Details URL' is stored,
+    rather than trying to fetch and store the PDF."""
     if not projects:
         return
 
@@ -522,23 +485,12 @@ def attach_certificates(session: requests.Session, projects: List[dict], page_ht
         rera_id = proj.get("RERA ID", "N/A")
         qstr = qstr_map.get(rera_id) if rera_id != "N/A" else None
 
-        if not qstr:
-            proj["Certificate PDF Path"] = "N/A"
-            proj["Certificate Status"] = "NOT_FOUND_ON_PAGE"
-            continue
-
-        try:
-            success, result = download_certificate_pdf(session, rera_id, qstr)
-        except Exception as e:
-            success, result = False, f"Unhandled exception: {e}"
-
-        if success:
-            proj["Certificate PDF Path"] = result
-            proj["Certificate Status"] = "DOWNLOADED"
+        if qstr:
+            proj["Certificate URL"] = f"{CERTIFICATE_ENDPOINT}?id={qstr}&type={CERTIFICATE_DOC_TYPE}"
+            proj["Certificate Status"] = "FOUND"
         else:
-            proj["Certificate PDF Path"] = "N/A"
-            proj["Certificate Status"] = "FAILED"
-            print(f"  [CERT FAILED] RERA ID {rera_id} (qstr={qstr}): {result}")
+            proj["Certificate URL"] = "N/A"
+            proj["Certificate Status"] = "NOT_FOUND_ON_PAGE"
 
 
 
@@ -630,7 +582,7 @@ def fetch_and_validate_page(
                         last_category = "ZERO_RECORDS_PARSED"
                         last_reason = "Parsed 0 projects from valid HTML signature"
                     else:
-                        attach_certificates(session, projects, last_html)
+                        attach_certificate_urls(projects, last_html)
                         return True, projects, "SUCCESS", "SUCCESS", last_html
 
         except requests.exceptions.Timeout:
@@ -679,7 +631,7 @@ def process_saved_debug_pages() -> Dict[int, List[dict]]:
 
             records = parse_html_content(content, page_num)
             if records:
-                attach_certificates(get_thread_session(0), records, content)
+                attach_certificate_urls(records, content)
                 recovered_results[page_num] = records
                 recovered_count += len(records)
                 print(f"  [DISK RECOVERED] Page {page_num:4d}: Extracted {len(records)} records")
@@ -715,7 +667,7 @@ def save_incremental_to_excel(
                         new_records_to_add.append(proj)
 
         headers = ["RERA ID", "Project Name", "Pincode", "District", "View Details URL", "Page Number",
-                   "Certificate PDF Path", "Certificate Status"]
+                   "Certificate URL", "Certificate Status"]
         file_exists = os.path.exists(filename)
         
         if file_exists:
@@ -828,7 +780,7 @@ def main():
             }
 
             for future in as_completed(futures):
-                check_stop_flag()
+                check_stop_flag(futures)
                 page = futures[future]
                 success, projects, category, reason, raw_html = future.result()
                 completed_count += 1
@@ -877,6 +829,7 @@ def main():
                 }
 
                 for rec_future in as_completed(rec_futures):
+                    check_stop_flag(rec_futures)
                     page = rec_futures[rec_future]
                     success, projects, category, reason, raw_html = rec_future.result()
                     rec_completed += 1
