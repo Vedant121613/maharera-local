@@ -55,6 +55,15 @@ OUTPUT_FILENAME = os.getenv("SCRAPE_OUTPUT_FILE", "PuneRera3.xlsx")
 SHEET_NAME = "Pune Projects"
 DEBUG_DIR = "debug_pages"
 
+# --- Certificate download (NEW, additive) -----------------------------
+# The "View Certificate" eye icon on each project card triggers a request
+# like /project-document?id=<data-qstr>&type=DocProjectCert. data-qstr is
+# project-specific and is scraped fresh per page — never hardcoded.
+CERTIFICATE_DOC_TYPE = "DocProjectCert"
+CERTIFICATE_ENDPOINT = f"{BASE_URL}/project-document"
+CERTIFICATE_DIR = os.getenv("SCRAPE_CERT_DIR", "certificates")
+CERT_READ_TIMEOUT = 20.0   # PDFs are larger/slower than the HTML search pages
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36",
@@ -399,8 +408,140 @@ def parse_html_content(html_content: str, source_page: int) -> List[dict]:
 
 
 # ==========================================
-# PARSER & RESPONSE VALIDATION
+# CERTIFICATE PDF DOWNLOAD (NEW, additive — does not touch any parser above)
 # ==========================================
+def extract_certificate_qstr_map(html_content: str) -> Dict[str, str]:
+    """Scans the raw page HTML for every "View Certificate" eye icon
+    (identified by data-qstr-flag="DocProjectCert") and reads its
+    project-specific data-qstr value, then associates it with whichever
+    RERA ID appears closest before it in the markup (RERA ID sits earlier
+    in the same project card than its action icons). Returns
+    {RERA ID: qstr}. Best-effort/heuristic, same style as the existing
+    proximity-based fallback parsers above — never raises.
+    """
+    qstr_map: Dict[str, str] = {}
+    try:
+        rera_pattern = re.compile(r"P\d{11}")
+        rera_positions = [(m.start(), m.group(0)) for m in rera_pattern.finditer(html_content)]
+        if not rera_positions:
+            return qstr_map
+
+        cert_pattern = re.compile(
+            r'data-qstr-flag=["\']DocProjectCert["\'][^>]*?data-qstr=["\']?([\w-]+)["\'\s>]'
+        )
+        for m in cert_pattern.finditer(html_content):
+            qstr_value = m.group(1)
+            icon_pos = m.start()
+
+            # Nearest preceding RERA ID (same card, listed above the icon)
+            nearest_id = None
+            nearest_dist = None
+            for pos, rid in rera_positions:
+                if pos <= icon_pos:
+                    dist = icon_pos - pos
+                    if dist < 6000 and (nearest_dist is None or dist < nearest_dist):
+                        nearest_dist = dist
+                        nearest_id = rid
+            if not nearest_id:
+                # fallback: nearest RERA ID after the icon, small window
+                for pos, rid in rera_positions:
+                    if pos >= icon_pos:
+                        dist = pos - icon_pos
+                        if dist < 2000 and (nearest_dist is None or dist < nearest_dist):
+                            nearest_dist = dist
+                            nearest_id = rid
+                        break
+
+            if nearest_id and nearest_id not in qstr_map:
+                qstr_map[nearest_id] = qstr_value
+    except Exception as e:
+        print(f"  [CERT MAP WARNING] Failed to extract data-qstr map: {e}")
+
+    return qstr_map
+
+
+def sanitize_filename(value: str) -> str:
+    return re.sub(r'[^A-Za-z0-9_-]', '_', value or "unknown")
+
+
+def download_certificate_pdf(session: requests.Session, rera_id: str, qstr: str) -> Tuple[bool, str]:
+    """Fetches the actual certificate PDF bytes for one project (the same
+    request the site's own JS fires when the eye icon is clicked) and saves
+    it to CERTIFICATE_DIR. Returns (success, local_path_or_error_message).
+    Never raises — caller treats failures as a normal per-project outcome.
+    """
+    if not os.path.exists(CERTIFICATE_DIR):
+        os.makedirs(CERTIFICATE_DIR, exist_ok=True)
+
+    dest_path = os.path.join(CERTIFICATE_DIR, f"{sanitize_filename(rera_id)}.pdf")
+    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+        return True, dest_path  # already downloaded in a previous run (resume)
+
+    extra_headers = {
+        "Accept": "*/*",
+        "Referer": f"{BASE_URL}{SEARCH_ENDPOINT}",
+        "X-Requested-With": "XMLHttpRequest",
+    }
+    params = {"id": qstr, "type": CERTIFICATE_DOC_TYPE}
+
+    try:
+        resp = session.get(
+            CERTIFICATE_ENDPOINT,
+            params=params,
+            headers=extra_headers,
+            timeout=(CONNECT_TIMEOUT, CERT_READ_TIMEOUT),
+        )
+        if resp.status_code != 200:
+            return False, f"HTTP {resp.status_code}"
+
+        content = resp.content
+        if not content or not content.lstrip()[:5].startswith(b"%PDF"):
+            return False, "Response was not a PDF (site likely returned an error/HTML page)"
+
+        with open(dest_path, "wb") as f:
+            f.write(content)
+        return True, dest_path
+    except requests.exceptions.Timeout:
+        return False, "Certificate download timed out"
+    except requests.RequestException as e:
+        return False, f"Network error: {e}"
+    except Exception as e:
+        return False, f"Unexpected error: {e}"
+
+
+def attach_certificates(session: requests.Session, projects: List[dict], page_html: str) -> None:
+    """Mutates each project dict in-place, adding 'Certificate PDF Path' and
+    'Certificate Status'. One project's failure never stops the others or
+    the rest of the scrape (logged and skipped, per-project)."""
+    if not projects:
+        return
+
+    qstr_map = extract_certificate_qstr_map(page_html)
+
+    for proj in projects:
+        rera_id = proj.get("RERA ID", "N/A")
+        qstr = qstr_map.get(rera_id) if rera_id != "N/A" else None
+
+        if not qstr:
+            proj["Certificate PDF Path"] = "N/A"
+            proj["Certificate Status"] = "NOT_FOUND_ON_PAGE"
+            continue
+
+        try:
+            success, result = download_certificate_pdf(session, rera_id, qstr)
+        except Exception as e:
+            success, result = False, f"Unhandled exception: {e}"
+
+        if success:
+            proj["Certificate PDF Path"] = result
+            proj["Certificate Status"] = "DOWNLOADED"
+        else:
+            proj["Certificate PDF Path"] = "N/A"
+            proj["Certificate Status"] = "FAILED"
+            print(f"  [CERT FAILED] RERA ID {rera_id} (qstr={qstr}): {result}")
+
+
+
 def get_pagination_info(html: str) -> Tuple[int, int]:
     soup = BeautifulSoup(html, "lxml")
     total_pages = 1
@@ -489,6 +630,7 @@ def fetch_and_validate_page(
                         last_category = "ZERO_RECORDS_PARSED"
                         last_reason = "Parsed 0 projects from valid HTML signature"
                     else:
+                        attach_certificates(session, projects, last_html)
                         return True, projects, "SUCCESS", "SUCCESS", last_html
 
         except requests.exceptions.Timeout:
@@ -537,6 +679,7 @@ def process_saved_debug_pages() -> Dict[int, List[dict]]:
 
             records = parse_html_content(content, page_num)
             if records:
+                attach_certificates(get_thread_session(0), records, content)
                 recovered_results[page_num] = records
                 recovered_count += len(records)
                 print(f"  [DISK RECOVERED] Page {page_num:4d}: Extracted {len(records)} records")
@@ -571,7 +714,8 @@ def save_incremental_to_excel(
                         SEEN_PROJECT_KEYS.add(key)
                         new_records_to_add.append(proj)
 
-        headers = ["RERA ID", "Project Name", "Pincode", "District", "View Details URL", "Page Number"]
+        headers = ["RERA ID", "Project Name", "Pincode", "District", "View Details URL", "Page Number",
+                   "Certificate PDF Path", "Certificate Status"]
         file_exists = os.path.exists(filename)
         
         if file_exists:

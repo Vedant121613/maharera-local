@@ -68,3 +68,12 @@ def post_basic_data(rows, batch_size=200):
     for i in range(0, len(rows), batch_size):
         batch = rows[i:i + batch_size]
         _request("POST", "/api/worker/basic-data", json={"rows": batch})
+
+
+def post_certificate(district, rera_id, pdf_base64=None, status=None):
+    payload = {"district": district, "reraId": rera_id}
+    if pdf_base64:
+        payload["pdfBase64"] = pdf_base64
+    else:
+        payload["status"] = status or "FAILED"
+    return _request("POST", "/api/worker/certificates", json=payload)

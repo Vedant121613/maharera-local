@@ -98,6 +98,12 @@ CREATE TABLE IF NOT EXISTS links (
 );
 CREATE INDEX IF NOT EXISTS idx_links_district ON links(district);
 
+-- Certificate PDF storage (NEW, additive) — the actual PDF bytes returned
+-- by /project-document?id=<qstr>&type=DocProjectCert, stored per project.
+ALTER TABLE links ADD COLUMN IF NOT EXISTS certificate_pdf BYTEA;
+ALTER TABLE links ADD COLUMN IF NOT EXISTS certificate_status VARCHAR(20);
+ALTER TABLE links ADD COLUMN IF NOT EXISTS certificate_downloaded_at TIMESTAMPTZ;
+
 CREATE TABLE IF NOT EXISTS basic_data (
   id BIGSERIAL PRIMARY KEY,
   project_id VARCHAR(50) UNIQUE,
@@ -380,6 +386,24 @@ app.post('/api/links/upload', express.raw({ type: '*/*', limit: '50mb' }), async
   }
 });
 
+// Serves one project's stored certificate PDF straight from Postgres.
+app.get('/api/links/:reraId/certificate', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT certificate_pdf, certificate_status FROM links WHERE rera_id = $1 LIMIT 1',
+      [req.params.reraId]
+    );
+    if (!rows[0] || !rows[0].certificate_pdf) {
+      return res.status(404).json({ success: false, error: rows[0]?.certificate_status || 'Certificate not available' });
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="${req.params.reraId}.pdf"`);
+    res.send(rows[0].certificate_pdf);
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.get('/api/links/export', async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM links ORDER BY district, rera_id');
@@ -529,6 +553,34 @@ app.post('/api/worker/jobs/:id/complete', async (req, res) => {
        WHERE id = $1::int`,
       [req.params.id, status, error || null]
     );
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Certificate PDFs — worker uploads the bytes it downloaded for one project.
+// One row per (district, rera_id) already exists via /api/worker/links;
+// this just attaches the PDF onto that same row.
+app.post('/api/worker/certificates', async (req, res) => {
+  const { district, reraId, pdfBase64, status } = req.body;
+  if (!district || !reraId) {
+    return res.status(400).json({ success: false, error: 'district and reraId are required' });
+  }
+  try {
+    if (pdfBase64) {
+      await pool.query(
+        `UPDATE links SET certificate_pdf = decode($3, 'base64'), certificate_status = 'DOWNLOADED',
+         certificate_downloaded_at = NOW() WHERE district = $1 AND rera_id = $2`,
+        [district, reraId, pdfBase64]
+      );
+    } else {
+      await pool.query(
+        `UPDATE links SET certificate_status = $3, certificate_downloaded_at = NOW()
+         WHERE district = $1 AND rera_id = $2`,
+        [district, reraId, status || 'FAILED']
+      );
+    }
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
