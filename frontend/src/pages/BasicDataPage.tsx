@@ -51,12 +51,12 @@ export default function BasicDataPage() {
           Upload Data
         </Text>
         <Text size="sm" c="dimmed" mb="md">
-          Upload the CSV/SQL export produced by the Data Worker. The backend validates and inserts
-          records — nothing is written to PostgreSQL from the browser.
+          Upload the .db file produced locally by the Data Worker (or a .csv/.sql export). The
+          backend validates and inserts records — nothing is written to PostgreSQL from the browser.
         </Text>
         <FileUpload
-          accept={['.csv', '.sql']}
-          helperText="Supported: .csv, .sql"
+          accept={['.csv', '.sql', '.db']}
+          helperText="Supported: .csv, .sql, .db"
           onUpload={async (file, onProgress) => {
             const res = await uploadBasicData(file, onProgress);
             if (res.success && res.data) setLastUpload(res.data);

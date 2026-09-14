@@ -70,12 +70,12 @@ export default function LinksPage() {
           Upload SQL
         </Text>
         <Text size="sm" c="dimmed" mb="md">
-          Upload the SQL file generated locally by the Link Worker. The file is sent to the backend
-          as-is for validation and import — the browser never executes SQL.
+          Upload the SQL or .db file generated locally by the Link Worker. The file is sent to the
+          backend as-is for validation and import — the browser never executes SQL.
         </Text>
         <FileUpload
-          accept={['.sql']}
-          helperText="Supported: .sql"
+          accept={['.sql', '.db']}
+          helperText="Supported: .sql, .db"
           onUpload={async (file, onProgress) => {
             const res = await uploadLinksSql(file, onProgress);
             if (res.success && res.data) setLastUpload(res.data);
