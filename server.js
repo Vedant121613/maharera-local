@@ -2,6 +2,8 @@ const express = require('express');
 const path = require('path');
 const { Pool } = require('pg');
 const cors = require('cors');
+const multer = require('multer');
+const initSqlJs = require('sql.js');
 // The frontend's buildUrl() sends unset filters as the literal string
 // "null" (not omitted), since it only checks `value !== undefined`. Treat
 // those (and "undefined"/"") as "no filter" everywhere we read query params.
@@ -40,6 +42,25 @@ const pool = new Pool({
 });
 
 const WORKER_TOKEN = process.env.WORKER_TOKEN || '';
+
+// SQLite (.db) upload support — data_scraper.py's local output is a SQLite
+// file (table "projects"); sql.js (pure WASM, no native build step) reads
+// it in-process so the uploaded file can be inserted straight into Postgres.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 300 * 1024 * 1024 } });
+let SQLJS = null;
+initSqlJs().then((sql) => { SQLJS = sql; }).catch((err) => console.error('Failed to init sql.js:', err));
+
+function readSqliteTable(fileBuffer, tableName) {
+  const db = new SQLJS.Database(new Uint8Array(fileBuffer));
+  try {
+    const result = db.exec(`SELECT * FROM ${tableName}`);
+    if (!result[0]) return [];
+    const { columns, values } = result[0];
+    return values.map((row) => Object.fromEntries(columns.map((c, i) => [c, row[i]])));
+  } finally {
+    db.close();
+  }
+}
 
 // Same district id/name pairs as frontend/src/mocks/districts.ts (MahaRERA's
 // own project_district select) — single source of truth for both sides.
@@ -372,20 +393,55 @@ app.get('/api/links', async (req, res) => {
   }
 });
 
-app.post('/api/links/upload', express.raw({ type: '*/*', limit: '50mb' }), async (req, res) => {
-  // Minimal support for the existing "upload a .sql dump" UI action: runs the
-  // uploaded file's statements as-is. Intended for trusted, manually-prepared
-  // exports only (this endpoint does not parse multipart itself beyond the
-  // raw body, matching the "minimum required" scope of this integration).
+app.post('/api/links/upload', upload.single('file'), async (req, res) => {
+  // Accepts a SQLite .db file (e.g. produced by the scraper) and upserts its
+  // rows into the links table — same dedup key (district, rera_id) as the
+  // normal worker upload path.
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'No file uploaded (expected form field "file")' });
+  }
+  if (!SQLJS) {
+    return res.status(503).json({ success: false, error: 'Server is still starting up, try again shortly' });
+  }
   try {
-    const sql = req.body.toString('utf-8');
+    let rows;
+    let tableUsed;
+    try {
+      rows = readSqliteTable(req.file.buffer, 'links');
+      tableUsed = 'links';
+    } catch {
+      // Fall back to the "projects" table (data_scraper.py's schema) and
+      // pull out just the link-relevant fields.
+      const projectRows = readSqliteTable(req.file.buffer, 'projects');
+      rows = projectRows.map((r) => ({
+        district: r.district, rera_id: r.rera_id, project_name: r.project_name,
+        pincode: r.pin_code, project_url: r.view_details_url, page_number: r.page_number,
+      }));
+      tableUsed = 'projects (link fields only)';
+    }
+
     const before = await pool.query('SELECT COUNT(*)::int AS c FROM links');
-    await pool.query(sql);
+    let processed = 0;
+    for (const r of rows) {
+      if (!r.rera_id || !r.district) continue;
+      await pool.query(
+        `INSERT INTO links (district, rera_id, project_name, pincode, project_url, page_number)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (district, rera_id) DO UPDATE SET
+           project_name = EXCLUDED.project_name, pincode = EXCLUDED.pincode,
+           project_url = EXCLUDED.project_url, page_number = EXCLUDED.page_number`,
+        [r.district, r.rera_id, r.project_name || 'N/A', r.pincode || 'N/A', r.project_url || 'N/A', r.page_number || 0]
+      );
+      processed += 1;
+    }
     const after = await pool.query('SELECT COUNT(*)::int AS c FROM links');
     const inserted = after.rows[0].c - before.rows[0].c;
-    res.json({ success: true, totalRecords: after.rows[0].c, inserted, duplicates: 0, failed: 0 });
+    res.json({
+      success: true, totalRecords: after.rows[0].c, inserted,
+      duplicates: processed - inserted, failed: rows.length - processed,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(400).json({ success: false, error: `Could not read .db file: ${err.message}` });
   }
 });
 
@@ -449,16 +505,49 @@ app.get('/api/basic-data', async (req, res) => {
   }
 });
 
-app.post('/api/basic-data/upload', express.raw({ type: '*/*', limit: '50mb' }), async (req, res) => {
+app.post('/api/basic-data/upload', upload.single('file'), async (req, res) => {
+  // Accepts the .db file data_scraper.py produces locally (table "projects")
+  // and upserts every row into basic_data — same key (project_id) and
+  // column set the automated worker upload already uses.
+  if (!req.file) {
+    return res.status(400).json({ success: false, error: 'No file uploaded (expected form field "file")' });
+  }
+  if (!SQLJS) {
+    return res.status(503).json({ success: false, error: 'Server is still starting up, try again shortly' });
+  }
   try {
-    const sql = req.body.toString('utf-8');
+    const rows = readSqliteTable(req.file.buffer, 'projects');
     const before = await pool.query('SELECT COUNT(*)::int AS c FROM basic_data');
-    await pool.query(sql);
+    let processed = 0;
+    for (const r of rows) {
+      if (!r.project_id) continue;
+      await pool.query(
+        `INSERT INTO basic_data (
+           project_id, rera_id, district, taluka, village, project_name, registration_number,
+           date_of_registration, proposed_completion_date, address, pincode, longitude, latitude,
+           view_details_url, page_number, status
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         ON CONFLICT (project_id) DO UPDATE SET
+           rera_id = EXCLUDED.rera_id, district = EXCLUDED.district, taluka = EXCLUDED.taluka,
+           village = EXCLUDED.village, project_name = EXCLUDED.project_name,
+           registration_number = EXCLUDED.registration_number, date_of_registration = EXCLUDED.date_of_registration,
+           proposed_completion_date = EXCLUDED.proposed_completion_date, address = EXCLUDED.address,
+           pincode = EXCLUDED.pincode, longitude = EXCLUDED.longitude, latitude = EXCLUDED.latitude,
+           view_details_url = EXCLUDED.view_details_url, page_number = EXCLUDED.page_number, status = EXCLUDED.status`,
+        [r.project_id, r.rera_id, r.district, r.taluka, r.village, r.project_name, r.registration_number,
+         r.date_of_registration, r.proposed_completion_date_original, r.address, r.pin_code, r.longitude,
+         r.latitude, r.view_details_url, r.page_number, r.status]
+      );
+      processed += 1;
+    }
     const after = await pool.query('SELECT COUNT(*)::int AS c FROM basic_data');
     const inserted = after.rows[0].c - before.rows[0].c;
-    res.json({ success: true, totalRecords: after.rows[0].c, inserted, duplicates: 0, failed: 0 });
+    res.json({
+      success: true, totalRecords: after.rows[0].c, inserted,
+      duplicates: processed - inserted, failed: rows.length - processed,
+    });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(400).json({ success: false, error: `Could not read .db file (expected a "projects" table): ${err.message}` });
   }
 });
 
