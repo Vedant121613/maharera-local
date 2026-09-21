@@ -1,0 +1,19 @@
+{
+  "name": "maharera-local-app",
+  "version": "1.0.0",
+  "main": "server-local.js",
+  "scripts": {
+    "local": "node server-local.js",
+    "local:dev": "nodemon server-local.js",
+    "build:frontend": "cd frontend && npm install && npm run build"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.3",
+    "express": "^4.18.2",
+    "better-sqlite3": "^9.2.2"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.2"
+  }
+}
