@@ -250,6 +250,7 @@ def save_project_to_db(record_dict):
 
 def create_driver():
     """Builds an isolated Selenium Chrome WebDriver instance per worker."""
+    print("[DRIVER] Creating Chrome WebDriver with headless configuration...")
     chrome_options = Options()
     # Headless mode for server environment
     chrome_options.add_argument("--headless=new")
@@ -258,6 +259,7 @@ def create_driver():
     chrome_options.add_argument("--disable-gpu")
     chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--window-size=1920,1080")
+    print("[DRIVER] Headless mode enabled with window size 1920x1080")
     # Disable images for faster loading
     chrome_options.add_experimental_option(
         "prefs", {
@@ -265,11 +267,18 @@ def create_driver():
         }
     )
     chrome_options.set_capability("goog:loggingPrefs", {"performance": "ALL"})
+    print("[DRIVER] Image loading disabled for performance")
 
-    return webdriver.Chrome(
-        service=Service(ChromeDriverManager().install()),
-        options=chrome_options
-    )
+    try:
+        driver = webdriver.Chrome(
+            service=Service(ChromeDriverManager().install()),
+            options=chrome_options
+        )
+        print("[DRIVER] Chrome WebDriver created successfully")
+        return driver
+    except Exception as e:
+        print(f"[DRIVER] ERROR: Failed to create Chrome WebDriver: {e}")
+        raise
 
 
 def get_captcha_text(driver):
@@ -548,11 +557,17 @@ def process_single_project_task(worker_id, project_row):
     driver = None
     http_session = None
     try:
+        print(f"[WORKER-{worker_id}] Starting project {project_id} (RERA: {project_row['rera_id']}, attempt {current_attempts}/{MAX_PROJECT_RETRIES})")
+        print(f"[WORKER-{worker_id}] URL: {view_url}")
+        
         driver = create_driver()
+        print(f"[WORKER-{worker_id}] Loading project page...")
         driver.get(view_url)
+        print(f"[WORKER-{worker_id}] Page loaded, solving CAPTCHA...")
 
         captcha_success = solve_captcha_step_with_retries(driver)
         if not captcha_success:
+            print(f"[WORKER-{worker_id}] CAPTCHA failed after retries")
             record.update({
                 "status": "RETRY" if current_attempts < MAX_PROJECT_RETRIES else "FAILED",
                 "failed_stage": "CAPTCHA",
@@ -560,12 +575,16 @@ def process_single_project_task(worker_id, project_row):
             })
             record["execution_time_sec"] = round(time.time() - start_time, 2)
             return record, worker_id
-
+        
+        print(f"[WORKER-{worker_id}] CAPTCHA solved! Creating authenticated session...")
         http_session = create_authenticated_http_session(driver)
+        print(f"[WORKER-{worker_id}] Session created, fetching project data via APIs...")
 
         # 1. General Details API
+        print(f"[WORKER-{worker_id}] Calling API: getProjectGeneralDetailsByProjectId...")
         gen_status, gen_raw = make_api_post(http_session, "getProjectGeneralDetailsByProjectId", project_id)
         if gen_status != 200 or not gen_raw:
+            print(f"[WORKER-{worker_id}] General Details API failed (HTTP {gen_status})")
             record.update({
                 "status": "RETRY" if current_attempts < MAX_PROJECT_RETRIES else "FAILED",
                 "failed_stage": "API",
@@ -575,10 +594,13 @@ def process_single_project_task(worker_id, project_row):
             })
             record["execution_time_sec"] = round(time.time() - start_time, 2)
             return record, worker_id
+        print(f"[WORKER-{worker_id}] General Details API: OK")
 
         # 2. Land Address API
+        print(f"[WORKER-{worker_id}] Calling API: getProjectLandAddressDetails...")
         land_status, land_raw = make_api_post(http_session, "getProjectLandAddressDetails", project_id)
         if land_status != 200 or not land_raw:
+            print(f"[WORKER-{worker_id}] Land Address API failed (HTTP {land_status})")
             record.update({
                 "status": "RETRY" if current_attempts < MAX_PROJECT_RETRIES else "FAILED",
                 "failed_stage": "API",
@@ -588,10 +610,13 @@ def process_single_project_task(worker_id, project_row):
             })
             record["execution_time_sec"] = round(time.time() - start_time, 2)
             return record, worker_id
+        print(f"[WORKER-{worker_id}] Land Address API: OK")
 
         # 3. GeoTagging API
+        print(f"[WORKER-{worker_id}] Calling API: getProjectLegalGeoTaggingDetailByProjectId...")
         geo_status, geo_raw = make_api_post(http_session, "getProjectLegalGeoTaggingDetailByProjectId", project_id)
         if geo_status != 200 or not geo_raw:
+            print(f"[WORKER-{worker_id}] GeoTagging API failed (HTTP {geo_status})")
             record.update({
                 "status": "RETRY" if current_attempts < MAX_PROJECT_RETRIES else "FAILED",
                 "failed_stage": "API",
@@ -601,8 +626,10 @@ def process_single_project_task(worker_id, project_row):
             })
             record["execution_time_sec"] = round(time.time() - start_time, 2)
             return record, worker_id
+        print(f"[WORKER-{worker_id}] GeoTagging API: OK")
 
         # Parse Data Fields
+        print(f"[WORKER-{worker_id}] Parsing project data...")
         gen_parsed = parse_general_details(gen_raw)
         land_parsed = parse_land_address_details(land_raw)
         geo_parsed = parse_geotagging_details(geo_raw)
@@ -628,8 +655,12 @@ def process_single_project_task(worker_id, project_row):
             "http_status": 200,
             "error_message": None
         })
+        elapsed = round(time.time() - start_time, 2)
+        print(f"[WORKER-{worker_id}] ✅ SUCCESS! Project {project_id} scraped in {elapsed}s - {gen_parsed['Project Name']}")
 
     except Exception as exc:
+        elapsed = round(time.time() - start_time, 2)
+        print(f"[WORKER-{worker_id}] ❌ EXCEPTION! Project {project_id} failed after {elapsed}s: {str(exc)[:200]}")
         record.update({
             "status": "RETRY" if current_attempts < MAX_PROJECT_RETRIES else "FAILED",
             "failed_stage": "UNKNOWN",
