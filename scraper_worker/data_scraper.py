@@ -251,7 +251,14 @@ def save_project_to_db(record_dict):
 def create_driver():
     """Builds an isolated Selenium Chrome WebDriver instance per worker."""
     chrome_options = Options()
-    chrome_options.add_argument("--start-maximized")
+    # Headless mode for server environment
+    chrome_options.add_argument("--headless=new")
+    chrome_options.add_argument("--no-sandbox")
+    chrome_options.add_argument("--disable-dev-shm-usage")
+    chrome_options.add_argument("--disable-gpu")
+    chrome_options.add_argument("--disable-software-rasterizer")
+    chrome_options.add_argument("--window-size=1920,1080")
+    # Disable images for faster loading
     chrome_options.add_experimental_option(
         "prefs", {
             "profile.managed_default_content_settings.images": 2,
