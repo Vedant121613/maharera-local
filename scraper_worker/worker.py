@@ -127,7 +127,8 @@ def build_input_excel(district, path: Path):
     return len(rows)
 
 
-def read_basic_data_sqlite(db_file: Path):
+def read_basic_data_sqlite(db_file: Path, district_name: str):
+    """Read scraped data from SQLite and ensure district is set correctly."""
     if not db_file.exists():
         return []
     conn = sqlite3.connect(str(db_file))
@@ -138,10 +139,14 @@ def read_basic_data_sqlite(db_file: Path):
     conn.close()
     out = []
     for r in rows:
+        # Force the correct district name (don't trust scraped data)
+        scraped_district = r.get("district", "").strip()
+        final_district = district_name if (not scraped_district or scraped_district == "NOT FOUND") else scraped_district
+        
         out.append({
             "projectId": r.get("project_id"),
             "reraId": r.get("rera_id"),
-            "district": r.get("district"),
+            "district": final_district,  # Use the job's district name
             "taluka": r.get("taluka"),
             "village": r.get("village"),
             "projectName": r.get("project_name"),
@@ -200,7 +205,7 @@ def run_data_job(job):
     print(f"[worker] Data scraper finished (returncode={returncode}, stopped={was_stopped})")
     print(f"[worker] Reading scraped data from SQLite: {db_file}")
 
-    rows = read_basic_data_sqlite(db_file)
+    rows = read_basic_data_sqlite(db_file, district)  # Pass district name
     print(f"[worker] Found {len(rows)} projects in local SQLite database")
     
     if rows:
