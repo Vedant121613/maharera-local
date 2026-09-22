@@ -23,7 +23,7 @@ from webdriver_manager.chrome import ChromeDriverManager
 # ============================================================
 # PRODUCTION CONFIGURATION
 # ============================================================
-MAX_BROWSER_WORKERS = 3           # Default production worker pool count
+MAX_BROWSER_WORKERS = 5           # Default production worker pool count
 RECOVERY_WORKERS = 1              # Worker pool count for recovery pass
 
 # NOTE: values are overridable via env vars by scraper_worker/worker.py so
