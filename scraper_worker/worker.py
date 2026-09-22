@@ -164,7 +164,10 @@ def run_data_job(job):
     print(f"[worker] Data job {job_id}: {district} (id={district_id})")
 
     input_file = DATA_DIR / f"links_{safe_name(district)}.xlsx"
+    print(f"[worker] Building input Excel from database links for {district}...")
     total_links = build_input_excel(district, input_file)
+    print(f"[worker] Input Excel created with {total_links} projects")
+    
     if total_links == 0:
         api.post_complete(job_id, "FAILED", error="No links found for this district. Run the Link Scraper first.")
         print(f"[worker] Data job {job_id} skipped: no links for {district}.")
@@ -187,22 +190,40 @@ def run_data_job(job):
         "STOP_FLAG_PATH": str(stop_flag),
     })
 
+    print(f"[worker] Starting data scraper subprocess for {district}...")
     api.post_progress(job_id, total=total_links)
 
     returncode, was_stopped = run_subprocess_with_stop_watch(
         [sys.executable, str(DATA_SCRAPER)], DATA_DIR, env, job_id
     )
+    
+    print(f"[worker] Data scraper finished (returncode={returncode}, stopped={was_stopped})")
+    print(f"[worker] Reading scraped data from SQLite: {db_file}")
 
     rows = read_basic_data_sqlite(db_file)
+    print(f"[worker] Found {len(rows)} projects in local SQLite database")
+    
     if rows:
-        api.post_basic_data(rows)
+        print(f"[worker] Uploading {len(rows)} projects to PostgreSQL database...")
+        try:
+            api.post_basic_data(rows)
+            print(f"[worker] ✅ Successfully uploaded {len(rows)} projects to database")
+        except Exception as e:
+            print(f"[worker] ❌ ERROR uploading to database: {e}")
+    else:
+        print(f"[worker] ⚠️  No data to upload (SQLite database is empty)")
+    
     succeeded = sum(1 for r in rows if r["status"] == "SUCCESS")
     failed = sum(1 for r in rows if r["status"] == "FAILED")
+    print(f"[worker] Summary: {succeeded} SUCCESS, {failed} FAILED out of {len(rows)} total")
+    
     api.post_progress(job_id, processed=len(rows), total=total_links, found=succeeded, failed=failed)
 
     if was_stopped:
+        print(f"[worker] Data job {job_id} was STOPPED by user")
         api.post_complete(job_id, "STOPPED")
     elif returncode == 0:
+        print(f"[worker] Data job {job_id} COMPLETED successfully")
         api.post_complete(job_id, "COMPLETED")
     else:
         api.post_complete(job_id, "FAILED", error=f"data_scraper.py exited with code {returncode}")
